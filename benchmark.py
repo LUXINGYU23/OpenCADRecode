@@ -5,13 +5,26 @@ CAD-Recode Benchmark Script
 
 主要功能：
 1. 加载多个模型（官方模型 + 训练的模型）
-2. 在data/val数据集上进行批量推理
+2. 在指定数据集上进行批量推理
 3. 生成CadQuery代码和STL/STEP文件
 4. 计算几何指标（IoU、Chamfer距离等）
 5. 生成详细的评估报告
 
+支持的数据集格式：
+- legacy: 原始格式，使用data/val目录
+- fusion360: Fusion360数据集，使用train_test.json拆分
+
 使用方法:
+# 使用legacy格式（原有方式）
 python benchmark.py --models official checkpoints_qwen3_sft --num_samples 100
+
+# 使用fusion360数据集的test拆分
+python benchmark.py --models official checkpoints_qwen3_sft --dataset_type fusion360 --split test --data_path fusion360dataset --train_test_json fusion360dataset/train_test.json --num_samples 100
+
+# 使用fusion360数据集的train拆分进行验证
+python benchmark.py --models checkpoints_qwen3_sft \\
+    --dataset_type fusion360 --split train --data_path fusion360dataset \\
+    --num_samples 500
 """
 
 import os
@@ -29,11 +42,17 @@ from datetime import datetime
 from dataclasses import dataclass, asdict
 from collections import defaultdict
 import warnings
+import shutil
 warnings.filterwarnings("ignore")
 
 import torch
 import torch.nn as nn
 import numpy as np
+try:
+    import OCC
+    OCC_AVAILABLE = True
+except ImportError:
+    OCC_AVAILABLE = False
 from tqdm import tqdm
 
 # 导入自定义模块
@@ -76,6 +95,11 @@ class BenchmarkConfig:
     batch_size: int = 1
     max_new_tokens: int = 768
     device: str = "auto"
+    
+    # 数据集相关配置
+    dataset_type: str = "legacy"  # "legacy" or "fusion360" 
+    split: str = "val"  # 对于fusion360: "train" or "test"
+    train_test_json: Optional[str] = None  # fusion360数据集的train/test拆分文件
     
     # 输出控制
     save_code: bool = True
@@ -213,7 +237,12 @@ class BenchmarkRunner:
         self.metrics_calculator = MetricsCalculator(sampling_config=sampling_config)
         
         # 加载数据索引
-        self.data_index = load_data_index(Path(config.data_path), "val")
+        if config.dataset_type == "fusion360":
+            self.data_index = self._load_fusion360_data_index()
+        else:
+            # 使用原有的加载方式
+            self.data_index = load_data_index(Path(config.data_path), config.split)
+        
         self.error_samples = load_error_samples(Path(config.data_path))
         
         # 处理简单格式的数据索引（val目录直接包含.py文件的情况）
@@ -447,12 +476,18 @@ class BenchmarkRunner:
         for i, sample_info in enumerate(tqdm(self.data_index, desc=f"Inference {model_config.name}")):
             sample_id = sample_info.get("sample_id", sample_info.get("id"))
             
-            # 加载点云
-            point_cloud = get_cached_point_cloud(
-                Path(self.config.data_path), 
-                sample_id, 
-                num_points=NUM_POINT_TOKENS
-            )
+            # 加载点云 - 根据数据源类型选择不同的方法
+            if sample_info.get("data_source") == "fusion360_step":
+                # 对于fusion360数据集，从STEP文件生成点云
+                step_file = sample_info.get("step_file")
+                point_cloud = self._get_point_cloud_from_step(step_file, sample_id)
+            else:
+                # 对于传统数据集，从缓存读取点云
+                point_cloud = get_cached_point_cloud(
+                    Path(self.config.data_path), 
+                    sample_id, 
+                    num_points=NUM_POINT_TOKENS
+                )
             
             if point_cloud is None:
                 print(f"Warning: No point cloud found for sample {sample_id}")
@@ -510,107 +545,427 @@ class BenchmarkRunner:
         
         return results
     
+    def _load_fusion360_data_index(self) -> List[Dict[str, Any]]:
+        """加载fusion360数据集的train/test拆分"""
+        # 确定train_test.json文件路径
+        if self.config.train_test_json:
+            train_test_file = Path(self.config.train_test_json)
+        else:
+            # 默认在fusion360dataset目录下查找
+            train_test_file = Path(self.config.data_path).parent / "fusion360dataset" / "train_test.json"
+        
+        if not train_test_file.exists():
+            raise FileNotFoundError(f"Train/test split file not found: {train_test_file}")
+        
+        print(f"Loading fusion360 {self.config.split} split from {train_test_file}")
+        
+        # 加载train/test拆分
+        with open(train_test_file, 'r', encoding='utf-8') as f:
+            train_test_data = json.load(f)
+        
+        if self.config.split not in train_test_data:
+            raise ValueError(f"Split '{self.config.split}' not found in {train_test_file}")
+        
+        sample_ids = train_test_data[self.config.split]
+        print(f"Found {len(sample_ids)} samples in {self.config.split} split")
+        
+        # 构建数据索引 - 基于fusion360数据集结构
+        data_index = []
+        
+        # fusion360数据集的reconstruction目录路径
+        reconstruction_dir = Path("cad-recode/fusion360dataset/reconstruction")
+        if not reconstruction_dir.exists():
+            # 尝试相对于当前工作目录的路径
+            reconstruction_dir = Path("fusion360dataset/reconstruction")
+            if not reconstruction_dir.exists():
+                # 尝试相对于data_path的路径
+                reconstruction_dir = Path(self.config.data_path).parent / "fusion360dataset" / "reconstruction"
+                if not reconstruction_dir.exists():
+                    raise FileNotFoundError(f"Fusion360 reconstruction directory not found")
+        
+        print(f"Using reconstruction directory: {reconstruction_dir}")
+        
+        found_samples = 0
+        missing_samples = 0
+        
+        for sample_id in sample_ids:
+            # 在reconstruction目录中查找对应的.step文件
+            # 文件名格式可能是: {sample_id}.step 或包含sample_id的文件名
+            step_file = None
+            
+            # 首先尝试精确匹配
+            exact_match = reconstruction_dir / f"{sample_id}.step"
+            if exact_match.exists():
+                step_file = exact_match
+            else:
+                # 尝试模糊匹配（文件名包含sample_id）
+                for step_candidate in reconstruction_dir.glob(f"*{sample_id}*.step"):
+                    step_file = step_candidate
+                    break
+            
+            if step_file and step_file.exists():
+                data_index.append({
+                    "id": sample_id,
+                    "sample_id": sample_id,
+                    "step_file": str(step_file),
+                    "split": self.config.split,
+                    "data_source": "fusion360_step"  # 标记数据来源
+                })
+                found_samples += 1
+            else:
+                print(f"Warning: STEP file not found for sample {sample_id}")
+                missing_samples += 1
+        
+        print(f"Successfully loaded {found_samples} samples from {self.config.split} split")
+        if missing_samples > 0:
+            print(f"Warning: {missing_samples} samples missing STEP files")
+        
+        return data_index
+    
+    def _get_point_cloud_from_step(self, step_file: str, sample_id: str) -> Optional[np.ndarray]:
+        """从STEP文件生成点云"""
+        try:
+            # 检查是否有缓存的点云
+            cache_dir = Path("point_cloud_cache_fusion360")
+            cache_dir.mkdir(exist_ok=True)
+            cache_file = cache_dir / f"{sample_id}.npy"
+            
+            if cache_file.exists():
+                try:
+                    point_cloud = np.load(cache_file)
+                    if point_cloud.shape[0] == NUM_POINT_TOKENS:
+                        return point_cloud.astype(np.float32)
+                except Exception as e:
+                    print(f"Warning: Failed to load cached point cloud for {sample_id}: {e}")
+            
+            # 如果没有缓存，从STEP文件生成点云
+            print(f"Generating point cloud from STEP file for {sample_id}")
+            
+            # # 方法1: 使用OCC直接从STEP文件采样点云
+            # if OCC_AVAILABLE:
+            #     point_cloud = self._step_to_point_cloud_direct(step_file)
+            #     if point_cloud is not None:
+            #         # 保存到缓存
+            #         np.save(cache_file, point_cloud)
+            #         return point_cloud
+            
+            # 方法2: STEP -> STL -> 点云
+            stl_file = self._step_to_stl(step_file, sample_id)
+            if stl_file:
+                point_cloud = self._stl_to_point_cloud(stl_file)
+                if point_cloud is not None:
+                    # 保存到缓存
+                    np.save(cache_file, point_cloud)
+                    return point_cloud
+            
+            print(f"Warning: Failed to generate point cloud from STEP file {step_file}")
+            return None
+            
+        except Exception as e:
+            print(f"Error generating point cloud from STEP file {step_file}: {e}")
+            return None
+    
+    def _step_to_point_cloud_direct(self, step_file: str) -> Optional[np.ndarray]:
+        """直接从STEP文件生成点云（使用OCC）"""
+        try:
+            from OCC.Core.STEPControl import STEPControl_Reader
+            from OCC.Core.IFSelect import IFSelect_RetDone
+            from OCC.Core.BRepMesh import BRepMesh_IncrementalMesh
+            from OCC.Core.TopExp import TopExp_Explorer
+            from OCC.Core.TopAbs import TopAbs_FACE
+            from OCC.Core.BRep import BRep_Tool
+            from OCC.Extend.TopologyUtils import TopologyExplorer
+            
+            # 读取STEP文件
+            step_reader = STEPControl_Reader()
+            status = step_reader.ReadFile(step_file)
+            if status != IFSelect_RetDone:
+                return None
+            
+            step_reader.TransferRoots()
+            shape = step_reader.OneShape()
+            
+            # 生成网格
+            mesh = BRepMesh_IncrementalMesh(shape, 0.1)
+            mesh.Perform()
+            
+            # 提取三角形顶点
+            points = []
+            explorer = TopologyExplorer(shape)
+            for face in explorer.faces():
+                location_out = None
+                location = BRep_Tool.Triangulation(face, location_out)
+                if location:
+                    triangulation = location.GetObject()
+                    for i in range(1, triangulation.NbNodes() + 1):
+                        node = triangulation.Node(i)
+                        points.append([node.X(), node.Y(), node.Z()])
+            
+            if len(points) == 0:
+                return None
+            
+            points = np.array(points, dtype=np.float32)
+            
+            # 采样到指定数量的点
+            if len(points) > NUM_POINT_TOKENS:
+                indices = np.random.choice(len(points), NUM_POINT_TOKENS, replace=False)
+                points = points[indices]
+            elif len(points) < NUM_POINT_TOKENS:
+                # 重复采样
+                indices = np.random.choice(len(points), NUM_POINT_TOKENS, replace=True)
+                points = points[indices]
+            
+            # 归一化到[-1, 1]
+            points = self._normalize_point_cloud(points)
+            
+            return points
+            
+        except Exception as e:
+            print(f"Error in direct STEP to point cloud conversion: {e}")
+            return None
+    
+    def _step_to_stl(self, step_file: str, sample_id: str) -> Optional[str]:
+        """将STEP文件转换为STL文件"""
+        try:
+            # 创建临时STL文件
+            temp_stl_dir = Path("temp_stl")
+            temp_stl_dir.mkdir(exist_ok=True)
+            stl_file = temp_stl_dir / f"{sample_id}_temp.stl"
+            
+            if OCC_AVAILABLE:
+                from OCC.Core.STEPControl import STEPControl_Reader
+                from OCC.Core.IFSelect import IFSelect_RetDone
+                from OCC.Extend.DataExchange import write_stl_file
+                
+                # 读取STEP文件
+                step_reader = STEPControl_Reader()
+                status = step_reader.ReadFile(step_file)
+                if status != IFSelect_RetDone:
+                    return None
+                
+                step_reader.TransferRoots()
+                shape = step_reader.OneShape()
+                
+                # 写入STL文件
+                write_stl_file(shape, str(stl_file))
+                
+                if stl_file.exists():
+                    return str(stl_file)
+            
+            return None
+            
+        except Exception as e:
+            print(f"Error converting STEP to STL: {e}")
+            return None
+    
+    def _stl_to_point_cloud(self, stl_file: str) -> Optional[np.ndarray]:
+        """从STL文件生成点云，使用简单的远点采样替代pytorch3d"""
+        import trimesh
+
+        try:
+            # 加载STL文件为mesh
+            mesh = trimesh.load(stl_file)
+
+            # 采样8192个点
+            vertices, _ = mesh.sample(8192, return_index=True)
+
+            # 使用简单的远点采样算法选取256个点
+            sampled_points = self._farthest_point_sampling(vertices, NUM_POINT_TOKENS)
+
+            # 归一化点云
+            sampled_points = self._normalize_point_cloud(sampled_points)
+
+            return sampled_points.astype(np.float32)
+        except Exception as e:
+            print(f"Error in _stl_to_point_cloud: {e}")
+            return None
+
+    def _farthest_point_sampling(self, points: np.ndarray, n_samples: int) -> np.ndarray:
+        """
+        远点采样算法（Farthest Point Sampling, FPS）
+        从点云中采样n_samples个点，使得采样点之间尽可能分散。
+        """
+        if points.shape[0] <= n_samples:
+            return points.copy()
+
+        sampled_indices = np.zeros(n_samples, dtype=np.int64)
+        n_points = points.shape[0]
+        distances = np.full(n_points, np.inf)
+
+        # 随机选择第一个点
+        first_idx = np.random.randint(0, n_points)
+        sampled_indices[0] = first_idx
+
+        # 迭代采样
+        for i in range(1, n_samples):
+            # 更新所有点到已采样点集的最小距离
+            last_sampled = points[sampled_indices[i - 1]]
+            dist = np.linalg.norm(points - last_sampled, axis=1)
+            distances = np.minimum(distances, dist)
+            # 选择距离已采样点集最远的点
+            next_idx = np.argmax(distances)
+            sampled_indices[i] = next_idx
+
+        return points[sampled_indices]
+    
+    def _normalize_point_cloud(self, points: np.ndarray) -> np.ndarray:
+        """归一化点云到[-1, 1]范围"""
+        # 中心化
+        center = points.mean(axis=0)
+        points = points - center
+        
+        # 缩放到[-1, 1]
+        max_dist = np.abs(points).max()
+        if max_dist > 0:
+            points = points / max_dist
+        
+        return points
+
     def _prepare_gt_step_files(self) -> Path:
-        """为GT数据生成STEP文件"""
+        """为GT数据生成STEP文件，并保存mesh（STL）"""
         gt_step_dir = self.output_dir / "gt_step_files"
         gt_step_dir.mkdir(exist_ok=True)
-        
-        print(f"🔧 Preparing GT STEP files...")
-        
-        # 创建临时的CadQuery执行器用于生成GT STEP文件
+        gt_stl_dir = self.output_dir / "gt_stl_files"
+        gt_stl_dir.mkdir(exist_ok=True)
+
+        print(f"🔧 Preparing GT STEP files and mesh (STL)...")
+
+        # 创建临时的CadQuery执行器用于生成GT STEP和STL文件
         temp_config = BatchInferenceConfig(
             output_dir=str(self.output_dir),
             cadquery_timeout=self.config.cadquery_timeout,
             save_code=False,
-            save_stl=False,
+            save_stl=True,
             save_step=True
         )
         gt_executor = CadQueryExecutor(temp_config)
-        
+
         generated_count = 0
         failed_count = 0
-        
+
         for sample_info in tqdm(self.data_index, desc="Generating GT STEP files"):
             sample_id = sample_info.get("sample_id", sample_info.get("id"))
-            
-            # 处理不同的数据格式
-            if "code_path" in sample_info:
+            gt_step_path = gt_step_dir / f"{sample_id}.step"
+            gt_stl_path = gt_stl_dir / f"{sample_id}.stl"
+            if "step_file" in sample_info:
+                # fusion360 格式，直接复制 step 文件
+                src_step = Path(sample_info["step_file"])
+                if src_step.exists():
+                    shutil.copy(src_step, gt_step_path)
+                    # mesh(STL) 也尝试生成
+                    try:
+                        # 只在未存在时生成
+                        if not gt_stl_path.exists():
+                            # 用 OCC 或者 trimesh 进行转换
+                            # 这里直接用 _step_to_stl
+                            stl_file = self._step_to_stl(str(gt_step_path), sample_id)
+                            if stl_file and Path(stl_file).exists():
+                                shutil.copy(stl_file, gt_stl_path)
+                    except Exception as e:
+                        print(f"Warning: Failed to generate GT STL for {sample_id}: {e}")
+                    generated_count += 1
+                    continue
+                else:
+                    print(f"Warning: GT STEP file not found: {src_step}")
+                    failed_count += 1
+                    continue
+            elif "code_path" in sample_info:
                 gt_code_path = Path(sample_info["code_path"])
             else:
-                # 简单格式，直接使用sample_id作为文件名
                 gt_code_path = Path(self.config.data_path) / f"{sample_id}.py"
-            
-            gt_step_path = gt_step_dir / f"{sample_id}.step"
-            
-            # 如果STEP文件已存在，跳过
-            if gt_step_path.exists():
+
+            # 如果STEP和STL文件已存在，跳过
+            if gt_step_path.exists() and gt_stl_path.exists():
                 generated_count += 1
                 continue
-            
+
             # 读取GT代码
             if not gt_code_path.exists():
                 print(f"Warning: GT code file not found: {gt_code_path}")
                 failed_count += 1
                 continue
-            
+
             try:
                 with open(gt_code_path, 'r', encoding='utf-8') as f:
                     gt_code = f.read()
-                
-                # 执行GT代码生成STEP文件
+
+                # 执行GT代码生成STEP和STL文件
                 success, error_msg, file_status = gt_executor.execute_cadquery_code(
                     gt_code,
-                    stl_output_path=None,  # 不需要STL
+                    stl_output_path=str(gt_stl_path),
                     step_output_path=str(gt_step_path)
                 )
-                
+
                 if success and file_status.get("step", False):
                     generated_count += 1
                 else:
                     print(f"Failed to generate GT STEP for {sample_id}: {error_msg}")
                     failed_count += 1
-                    
+
             except Exception as e:
                 print(f"Error processing GT code for {sample_id}: {e}")
                 failed_count += 1
-        
+
         print(f"GT STEP generation completed: {generated_count} success, {failed_count} failed")
         return gt_step_dir
     
     def _compute_metrics(self, all_results: Dict[str, Any]) -> Dict[str, Any]:
-        """计算几何指标 - 使用STEP格式进行BREP计算"""
+        """计算几何指标 - 仅对所有模型都成功生成step的样本进行指标计算"""
         metrics_results = {}
-        
         # 为GT数据生成STEP文件
         gt_step_dir = self._prepare_gt_step_files()
-        
+
+        # 1. 找到所有模型都成功生成step的样本id交集
+        all_model_success_ids = None
+        model_pred_step_dirs = {}
         for model_name, model_results in all_results.items():
-            print(f"  Computing metrics for {model_name}...")
             model_dir = self.output_dir / "results" / model_name
             pred_step_dir = model_dir / "generated_step"
-            
-            # 收集需要计算指标的文件对
-            file_pairs = []
+            model_pred_step_dirs[model_name] = pred_step_dir
+            success_ids = set()
             for sample_id, sample_result in model_results["samples"].items():
                 if sample_result["step_generated"]:
                     gt_step = gt_step_dir / f"{sample_id}.step"
                     pred_step = pred_step_dir / f"{sample_id}.step"
-                    
                     if gt_step.exists() and pred_step.exists():
-                        file_pairs.append((str(gt_step), str(pred_step)))
-            
+                        success_ids.add(sample_id)
+            if all_model_success_ids is None:
+                all_model_success_ids = success_ids
+            else:
+                all_model_success_ids = all_model_success_ids & success_ids
+
+        if not all_model_success_ids or len(all_model_success_ids) == 0:
+            print("\nNo common successful samples for all models. Metrics cannot be computed.")
+            for model_name in all_results.keys():
+                metrics_results[model_name] = {"error": "No common successful samples for all models"}
+            return metrics_results
+
+        print(f"\nFound {len(all_model_success_ids)} samples with successful STEP for all models. Only these will be used for metrics.")
+
+        # 2. 对每个模型，仅对交集样本计算指标
+        for model_name, model_results in all_results.items():
+            print(f"  Computing metrics for {model_name}...")
+            model_dir = self.output_dir / "results" / model_name
+            pred_step_dir = model_pred_step_dirs[model_name]
+            file_pairs = []
+            for sample_id in all_model_success_ids:
+                gt_step = gt_step_dir / f"{sample_id}.step"
+                pred_step = pred_step_dir / f"{sample_id}.step"
+                if gt_step.exists() and pred_step.exists():
+                    file_pairs.append((str(gt_step), str(pred_step)))
+
             if not file_pairs:
                 print(f"    No valid file pairs found for {model_name}")
                 metrics_results[model_name] = {"error": "No valid file pairs"}
                 continue
-            
+
             print(f"    Found {len(file_pairs)} valid GT-Prediction pairs for metric calculation")
-            
+
             # 直接计算指标 - 使用简化的方法
             try:
                 batch_results = []
                 print(f"    Computing metrics for each pair...")
-                
+
                 for i, (gt_file, pred_file) in enumerate(file_pairs):
                     try:
                         result = self.metrics_calculator.compute_files_metrics(
@@ -621,7 +976,7 @@ class BenchmarkRunner:
                             include_normals=True,
                             use_icp=True
                         )
-                        
+
                         if result is not None:
                             result_dict = result.to_dict()
                             result_dict['file1'] = gt_file.replace("\\", "/")
@@ -633,20 +988,20 @@ class BenchmarkRunner:
                             print(f"      ❌ Pair {i+1}/{len(file_pairs)}: Failed")
                     except Exception as e:
                         print(f"      ❌ Pair {i+1}/{len(file_pairs)}: Error - {e}")
-                
+
                 print(f"    Computed {len(batch_results)} successful metric results for {model_name}")
                 # 计算平均指标
                 if batch_results:
                     metrics = self._compute_average_metrics(batch_results)
                     metrics["total_pairs"] = len(file_pairs)
                     metrics["successful_pairs"] = len(batch_results)
-                    
+
                     print(f"    Metrics computed for {metrics['successful_pairs']}/{metrics['total_pairs']} pairs")
                 else:
                     metrics = {"error": "No successful metric computations"}
-                
+
                 metrics_results[model_name] = metrics
-                
+
                 # 保存详细指标
                 metrics_file = model_dir / "detailed_metrics.json"
                 with open(metrics_file, 'w') as f:
@@ -655,12 +1010,12 @@ class BenchmarkRunner:
                         "batch_results": batch_results,
                         "file_pairs": [(str(p[0]), str(p[1])) for p in file_pairs]
                     }, f, indent=2)
-                
+
             except Exception as e:
                 print(f"    Error computing metrics for {model_name}: {e}")
                 traceback.print_exc()
                 metrics_results[model_name] = {"error": str(e)}
-        
+
         return metrics_results
     
     def _compute_average_metrics(self, batch_results: List[Dict]) -> Dict[str, float]:
@@ -856,8 +1211,16 @@ def parse_args():
     
     parser.add_argument("--data_path", default="data/val",
                        help="Path to validation data")
-    parser.add_argument("--output_dir", default="benchmark_results",
+    parser.add_argument("--output_dir", default="benchmark_results_fusion360",
                        help="Output directory for results")
+    
+    # 数据集类型和拆分参数
+    parser.add_argument("--dataset_type", choices=["legacy", "fusion360"], default="legacy",
+                       help="Dataset type: 'legacy' for original format, 'fusion360' for fusion360 dataset")
+    parser.add_argument("--split", default="val", 
+                       help="Data split to use. For legacy: 'train'/'val'. For fusion360: 'train'/'test'")
+    parser.add_argument("--train_test_json", 
+                       help="Path to train_test.json file for fusion360 dataset (default: fusion360dataset/train_test.json)")
     
     parser.add_argument("--num_samples", type=int,
                        help="Number of samples to evaluate (default: all)")
@@ -941,6 +1304,9 @@ def main():
         batch_size=args.batch_size,
         max_new_tokens=args.max_new_tokens,
         device=args.device,
+        dataset_type=args.dataset_type,
+        split=args.split,
+        train_test_json=args.train_test_json,
         save_code=not args.no_code,
         save_stl=not args.no_stl,
         save_step=not args.no_step,

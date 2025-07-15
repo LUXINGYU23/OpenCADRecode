@@ -11,3 +11,7 @@ swanlog/
 testrlcad/
 __pycache__/
 .ipynb_checkpoints/
+fusion360dataset/
+temp_stl/
+point_cloud_cache_fusion360/
+benchmark_results_fusion360/
