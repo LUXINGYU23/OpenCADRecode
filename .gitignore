@@ -1,0 +1,13 @@
+data/
+benchmark_results/
+cad-recode-v1.5/
+checkpoints_qwen3_lora/
+checkpoints_qwen3_sft/
+checkpoints_qwen3_lora_from_full/
+inference_results/
+inference_results_lora_from_full/
+Open3D/
+swanlog/
+testrlcad/
+__pycache__/
+.ipynb_checkpoints/

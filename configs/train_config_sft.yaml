@@ -1,0 +1,51 @@
+# CAD-Recode v2.0 训练配置文件
+# 基于train_qwen3重构，使用SFT训练
+
+# 模型配置
+base_model_name: "Qwen/Qwen3-1.7B-Base"  # 支持切换为其他模型，如"Qwen/Qwen2-7B"、"Qwen/Qwen2.5-1.5B"等
+model_save_path: "checkpoints_qwen3_sft"
+
+# 数据配置
+train_data_path: "data/train"
+val_data_path: "data/val"
+max_seq_length: 1024  # NUM_POINT_TOKENS(256) + MAX_CODE_TOKENS(768)
+n_points: 256
+
+# 训练配置
+max_steps: 100000
+batch_size: 8
+gradient_accumulation_steps: 4
+learning_rate: 0.0002
+weight_decay: 0.01
+warmup_steps: 1000
+
+# 评估和保存配置
+eval_steps: 5000
+save_steps: 10000
+logging_steps: 50
+seed: 42
+
+# 硬件配置
+device: "auto"
+mixed_precision: "bf16"
+num_workers: 0
+
+# 数据增强配置
+noise_probability: 0.5
+noise_std: 0.01
+
+# 实验跟踪配置
+experiment_name: "cad-recode-v2-qwen3-full"
+use_swanlab: true
+
+# 模型特定配置说明：
+# - 支持切换到其他Qwen模型（如Qwen2-7B、Qwen2.5系列）
+# - 自动处理模型配置差异
+# - 使用SFT训练而非DPO
+# - 集成SwanLab进行实验跟踪
+
+# 训练策略：
+# - 有效batch size: 4 * 4 = 16
+# - 总训练步数: 100,000步
+# - 学习率调度: 线性warmup + cosine annealing
+# - 数据增强: 50%概率添加高斯噪声

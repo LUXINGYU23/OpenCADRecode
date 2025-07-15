@@ -1,0 +1,35 @@
+# CAD-Recode 训练配置文件 (基于论文优化) - 完整版
+
+# 模型配置
+base_model_name: "Qwen/Qwen2-1.5B"  # 本地模型路径
+model_save_path: "checkpoints"     # 模型保存路径
+
+# 数据配置
+train_data_path: "data/train"  # 训练数据路径  
+val_data_path: "data/val"      # 验证数据路径
+max_seq_length: 1024                 # 最大序列长度
+n_points: 256                        # 点云点数
+
+# 训练配置 (基于CAD-Recode论文优化)
+max_training_steps: 250000           # 25万次迭代 (论文设置)
+batch_size: 2                       # 增加批处理大小
+gradient_accumulation_steps: 4       # 梯度累积步数 (适应GPU内存)
+learning_rate: 0.0002               # 论文中的学习率 (2e-4)
+weight_decay: 0.01                   # 权重衰减 (论文设置)
+warmup_steps: 1000                   # 1千次warmup (论文设置)
+
+# 评估和保存配置
+eval_steps: 2000                     # 评估间隔
+save_steps: 4000                     # 保存间隔 (必须是eval_steps的倍数)
+logging_steps: 50                   # 日志记录间隔
+seed: 42                             # 随机种子
+
+# 硬件配置  
+device: "auto"                       # 自动选择设备
+mixed_precision: "bf16"              # 论文使用的精度
+num_workers: 0                       # DataLoader进程数 (0避免多进程嵌套问题)
+
+
+# 预期训练时间：约12小时 (单个H100 GPU)
+# 有效batch size: 18 * 2 = 36
+# 训练策略完全基于CAD-Recode论文优化

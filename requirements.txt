@@ -1,0 +1,39 @@
+# CAD-Recode Training Requirements
+
+# 核心机器学习框架
+torch>=2.0.0
+transformers>=4.40.0
+pytorch3d
+datasets
+
+# LoRA和量化支持
+peft>=0.7.0
+bitsandbytes>=0.41.0
+accelerate>=0.24.0
+
+# 点云和3D处理
+trimesh
+open3d
+scipy
+scikit-image
+
+# CAD相关
+cadquery
+
+# OpenCascade (可选，用于STEP文件处理)
+# 注意：可能需要单独安装 python-opencascade
+# conda install -c conda-forge pythonocc-core
+
+# 配置和工具
+pyyaml
+tqdm
+numpy
+matplotlib
+
+# 开发和调试
+jupyter
+ipython
+
+# 可选：分布式训练
+# accelerate
+# deepspeed

@@ -1,0 +1,84 @@
+# CAD-Recode v2.0 QLoRA训练配置文件
+# 极低显存的量化LoRA微调方案，适用于12GB及以下显存
+
+# 模型配置
+base_model_name: "Qwen/Qwen3-1.7B-Base"  # 或者使用更大的模型如Qwen2-7B
+model_save_path: "checkpoints_qwen3_qlora"
+
+# 数据配置
+train_data_path: "data/train"
+val_data_path: "data/val"
+max_seq_length: 1024
+n_points: 256
+
+# 训练配置 - QLoRA可以使用更积极的配置
+max_steps: 50000
+batch_size: 32  # QLoRA可以使用更大的batch size
+gradient_accumulation_steps: 1
+learning_rate: 0.0002
+weight_decay: 0.01
+warmup_steps: 1000
+
+# 评估和保存配置
+eval_steps: 2000
+save_steps: 5000
+logging_steps: 50
+seed: 42
+
+# 硬件配置
+device: "auto"
+mixed_precision: "fp16"  # QLoRA推荐使用fp16
+num_workers: 4
+
+# 数据增强配置
+noise_probability: 0.5
+noise_std: 0.01
+
+# LoRA配置
+use_lora: true
+lora_r: 64          # QLoRA可以使用更高的秩
+lora_alpha: 128     # 对应的alpha值
+lora_dropout: 0.05  # 稍低的dropout
+lora_target_modules:
+  - "q_proj"
+  - "k_proj"
+  - "v_proj"
+  - "o_proj"
+  - "gate_proj"
+  - "up_proj"
+  - "down_proj"
+
+# 自动合并配置 - QLoRA建议只在最终保存时合并以节省时间
+auto_merge_lora: true          # 是否在训练过程中自动合并权重
+auto_merge_final: true         # 是否在最终保存时合并权重
+keep_lora_only: true          # 训练过程中是否保留LoRA权重文件
+keep_lora_final: true         # 最终保存是否保留LoRA权重文件
+merge_final_only: true        # QLoRA建议只在最终保存时合并（节省训练时间和显存）
+
+# QLoRA量化配置 - 开启所有优化
+use_qlora: true
+load_in_4bit: true
+load_in_8bit: false
+bnb_4bit_compute_dtype: "bfloat16"
+bnb_4bit_use_double_quant: true  # 双重量化，进一步节省内存
+bnb_4bit_quant_type: "nf4"       # NF4量化类型，平衡性能和内存
+
+# 实验跟踪配置
+experiment_name: "cad-recode-v2-qlora-qwen3-1.7b"
+use_swanlab: true
+
+# QLoRA优势：
+# 1. 极低显存需求：可在12GB显存训练7B+模型
+# 2. 接近全参数微调的性能
+# 3. 训练速度快，收敛稳定
+# 4. 适合资源受限的环境
+
+# 内存估算（近似值）：
+# - Qwen3-1.7B + QLoRA: ~6GB显存
+# - Qwen2-7B + QLoRA: ~12GB显存  
+# - 相比全参数微调节省80%+显存
+
+# 使用建议：
+# 1. 如果显存<12GB，使用此配置
+# 2. 如果显存>=16GB，可以考虑普通LoRA配置  
+# 3. 如果显存>=24GB，可以考虑全参数微调
