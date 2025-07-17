@@ -24,6 +24,9 @@ from typing import Tuple
 from transformers import TrainingArguments, Trainer
 
 # 导入自定义模块
+import sys
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'utils',)))
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'models',)))
 from utils import TrainingConfig, setup_environment, set_random_seeds
 from models import create_model_and_tokenizer
 from data_utils import CADRecodeDataset, DataCollatorForCADRecode
