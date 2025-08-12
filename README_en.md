@@ -30,8 +30,6 @@
    - [5.2 Report Layout](#52-report-layout)
 6. [Example Benchmark Result](#6-example-benchmark-result)
 7. [Model / Checkpoint Layout](#7-model--checkpoint-layout)
-8. [Quick Reproduction Guide](#8-quick-reproduction-guide)
-9. [Citation](#9-citation)
 
 ---
 ## 1. Environment Setup
