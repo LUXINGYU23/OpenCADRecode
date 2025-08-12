@@ -3,25 +3,25 @@
 
 # 模型配置
 base_model_name: "Qwen/Qwen3-1.7B-Base"  # 支持切换为其他模型，如"Qwen/Qwen2-7B"、"Qwen/Qwen2.5-1.5B"等
-model_save_path: "checkpoints_qwen3_sft"
+model_save_path: "cad-recode/checkpoints_qwen3_sft_H100"
 
 # 数据配置
-train_data_path: "data/train"
-val_data_path: "data/val"
+train_data_path: "cad-recode/data/train"
+val_data_path: "cad-recode/data/val"
 max_seq_length: 1024  # NUM_POINT_TOKENS(256) + MAX_CODE_TOKENS(768)
 n_points: 256
 
 # 训练配置
 max_steps: 100000
-batch_size: 8
-gradient_accumulation_steps: 4
+batch_size: 18
+gradient_accumulation_steps: 2
 learning_rate: 0.0002
 weight_decay: 0.01
 warmup_steps: 1000
 
 # 评估和保存配置
-eval_steps: 5000
-save_steps: 10000
+eval_steps: 10000
+save_steps: 20000
 logging_steps: 50
 seed: 42
 
@@ -35,7 +35,7 @@ noise_probability: 0.5
 noise_std: 0.01
 
 # 实验跟踪配置
-experiment_name: "cad-recode-v2-qwen3-full"
+experiment_name: "cad-recode-v2-qwen3-full_H100"
 use_swanlab: true
 
 # 模型特定配置说明：

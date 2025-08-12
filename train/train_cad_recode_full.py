@@ -11,7 +11,7 @@ CAD-Recode 训练脚本 v2.0 - 精简版
 5. 模块化设计，分离模型、数据和工具函数
 
 使用方法:
-python train_cad_recode_full.py --config configs/train_config_sft.yaml
+python train/train_cad_recode_full.py --config configs/train_config_sft.yaml
 """
 
 import os

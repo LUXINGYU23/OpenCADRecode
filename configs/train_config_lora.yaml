@@ -3,11 +3,11 @@
 
 # 模型配置
 base_model_name: "Qwen/Qwen3-1.7B-Base"  # 支持切换为其他模型
-model_save_path: "checkpoints_qwen3_lora"
+model_save_path: "cad-recode/checkpoints_qwen3_lora"
 
 # 数据配置
-train_data_path: "data/train"
-val_data_path: "data/val"
+train_data_path: "cad-recode/data/train"
+val_data_path: "cad-recode/data/val"
 max_seq_length: 1024  # NUM_POINT_TOKENS(256) + MAX_CODE_TOKENS(768)
 n_points: 256
 

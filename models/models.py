@@ -201,6 +201,7 @@ def create_model_and_tokenizer(config):
         config.base_model_name,
         config=model_config,
         torch_dtype=torch.bfloat16 if config.mixed_precision == "bf16" else torch.float16,
+        attn_implementation = 'flash_attention_2' if torch.cuda.is_available() else None,
         trust_remote_code=True
     )
     
